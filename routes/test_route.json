@@ -1,0 +1,13 @@
+{
+  "route_name": "test_route.json",
+  "waypoints": [
+    {
+      "dx": -270,
+      "dy": 415
+    },
+    {
+      "dx": -2,
+      "dy": 100
+    }
+  ]
+}
