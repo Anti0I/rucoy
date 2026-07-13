@@ -41,12 +41,14 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
 LIZARD_TEMPLATES_DIR = os.path.join(TEMPLATES_DIR, "lizard_variants")
 ITEM_TEMPLATES_DIR = os.path.join(TEMPLATES_DIR, "item_variants")
+SPIKE_TEMPLATES_DIR = os.path.join(TEMPLATES_DIR, "spike_variants")
 ROUTES_DIR = os.path.join(BASE_DIR, "routes")
 DEBUG_DIR = os.path.join(BASE_DIR, "debug")
 
-# --- Ustawienia detekcji i smyczy bojowej ---
+# --- Ustawienia detekcji, kolców i smyczy bojowej ---
 MATCH_THRESHOLD = 0.60          # Próg wykrywania jaszczurów (60% zgodności)
 ITEM_MATCH_THRESHOLD = 0.65     # Próg wykrywania leżącego lootu
+SPIKE_MATCH_THRESHOLD = 0.60    # Próg wykrywania kolców pułapek (60% zgodności)
 MAX_ATTACK_DIST_PX = 270        # Maksymalny dystans do moba (blizej niz 5 kratek, ok. 270px)
 LEASH_MAX_TILES_X = 6           # Maksymalne odchylenie w osi X od kotwicy trasy (6 kratek)
 LEASH_MAX_TILES_Y = 4           # Maksymalne odchylenie w osi Y od kotwicy trasy (4 kratki)
@@ -145,17 +147,19 @@ class WindowManager:
 class GameVision:
     def __init__(self):
         self.sct = mss.MSS()
-        self.templates = []       # lista wariantów szablonu jaszczura (grayscale)
-        self.item_templates = []  # lista wariantów szablonu lootu/przedmiotów (grayscale)
+        self.templates = []
+        self.item_templates = []
+        self.spike_templates = []
         self.load_templates()
         self.load_item_templates()
+        self.load_spike_templates()
         if DEBUG_MODE:
             os.makedirs(DEBUG_DIR, exist_ok=True)
 
     def load_templates(self):
-        self.templates = []
-        if not os.path.isdir(LIZARD_TEMPLATES_DIR):
-            print("[Vision] Brak katalogu z wariantami szablonu jaszczura.")
+        """Ładuje wszystkie warianty szablonów jaszczura z folderu templates/lizard_variants."""
+        if not os.path.exists(LIZARD_TEMPLATES_DIR):
+            print(f"[Vision] Brak folderu {LIZARD_TEMPLATES_DIR}")
             return False
 
         for fname in sorted(os.listdir(LIZARD_TEMPLATES_DIR)):
@@ -167,14 +171,12 @@ class GameVision:
         if self.templates:
             print(f"[Vision] Załadowano {len(self.templates)} wariantów szablonu jaszczura.")
             return True
-        print("[Vision] Nie znaleziono żadnych wariantów szablonu jaszczura.")
+        print("[Vision] Brak wariantów szablonów w templates/lizard_variants.")
         return False
 
     def load_item_templates(self):
-        self.item_templates = []
-        if not os.path.isdir(ITEM_TEMPLATES_DIR):
-            os.makedirs(ITEM_TEMPLATES_DIR, exist_ok=True)
-            print("[Vision] Utworzono pusty katalog z wariantami szablonów lootu.")
+        """Ładuje wszystkie warianty szablonów lootu z folderu templates/item_variants."""
+        if not os.path.exists(ITEM_TEMPLATES_DIR):
             return False
 
         for fname in sorted(os.listdir(ITEM_TEMPLATES_DIR)):
@@ -187,6 +189,23 @@ class GameVision:
             print(f"[Vision] Załadowano {len(self.item_templates)} wariantów szablonu lootu.")
             return True
         print("[Vision] Brak wariantów szablonów lootu w templates/item_variants.")
+        return False
+
+    def load_spike_templates(self):
+        """Ładuje wszystkie warianty szablonów kolców z folderu templates/spike_variants."""
+        if not os.path.exists(SPIKE_TEMPLATES_DIR):
+            return False
+
+        for fname in sorted(os.listdir(SPIKE_TEMPLATES_DIR)):
+            path = os.path.join(SPIKE_TEMPLATES_DIR, fname)
+            tpl = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+            if tpl is not None and tpl.size > 0:
+                self.spike_templates.append(tpl)
+
+        if self.spike_templates:
+            print(f"[Vision] Załadowano {len(self.spike_templates)} wariantów szablonu kolców.")
+            return True
+        print("[Vision] Brak wariantów szablonów kolców w templates/spike_variants.")
         return False
 
     def capture_client_area(self, client_rect):
@@ -307,6 +326,35 @@ class GameVision:
             self._save_loot_debug_frame(img_bgr, best_loc, best_size, best_score, threshold)
 
         return closest_target, best_score
+
+    def find_spike_target(self, img_bgr, threshold=SPIKE_MATCH_THRESHOLD):
+        """
+        Wyszukuje obecność kolców (pułapek) na ekranie.
+        Zwraca True/False w zależności od tego, czy znaleziono kolce o dopasowaniu >= threshold
+        oraz najwyższy wynik dopasowania.
+        """
+        if not self.spike_templates:
+            return False, 0.0
+
+        img_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+        img_gray = self._mask_ui(img_gray)
+
+        best_score = 0.0
+
+        for template in self.spike_templates:
+            for scale in SCALE_RANGE:
+                resized = cv2.resize(template, None, fx=scale, fy=scale)
+                th, tw = resized.shape[:2]
+                if th >= img_gray.shape[0] or tw >= img_gray.shape[1]:
+                    continue
+                
+                result = cv2.matchTemplate(img_gray, resized, cv2.TM_CCOEFF_NORMED)
+                min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+                if max_val > best_score:
+                    best_score = max_val
+
+        has_spikes = best_score >= threshold
+        return has_spikes, best_score
 
     def _save_loot_debug_frame(self, img_bgr, loc, size, score, threshold):
         h, w = size
@@ -497,17 +545,20 @@ class RucoyBot:
             self.state = BotState.PATROL
             return
 
-        # 3. Skanowanie potworów oraz podłogi (LOOT)
+        # 3. Skanowanie potworów, podłogi (LOOT) oraz kolców (SPIKES)
         mob_target, mob_score = self.vision.find_lizard_target(screen)
         loot_target, loot_score = self.vision.find_loot_target(screen)
+        has_spikes, spike_score = self.vision.find_spike_target(screen)
 
         if DEBUG_MODE:
             if mob_target:
                 print(f"[Vision][DEBUG] MOB score={mob_score:.3f} target={mob_target}")
             if loot_target:
                 print(f"[Vision][DEBUG] LOOT score={loot_score:.3f} target={loot_target}")
+            if has_spikes:
+                print(f"[Vision][DEBUG] SPIKES score={spike_score:.3f}")
 
-        # Wyliczenie dystansu kafelkowego i klasyfikacja bliskich/dalekich mobków (Branch: FAST)
+        # Wyliczenie dystansu kafelkowego i klasyfikacja bliskich/dalekich mobków (Branch: FAST + SAFE MODE dla kolców)
         tile_size_px = 54.3
         is_close_mob = False
         is_far_mob = False
@@ -518,7 +569,10 @@ class RucoyBot:
             tiles_x = abs(dx) / tile_size_px
             tiles_y = abs(dy) / tile_size_px
 
-            if tiles_x <= 3.0 and tiles_y <= 3.0 and (tiles_x > 0.4 or tiles_y > 0.4):
+            # Gdy widoczne są KOLCE -> wchodzimy w Tryb SAFE (rozszerzamy bezwzględną granicę zatrzymania do 4 kratek)
+            mob_safe_limit = 4.0 if has_spikes else 3.0
+
+            if tiles_x <= mob_safe_limit and tiles_y <= mob_safe_limit and (tiles_x > 0.4 or tiles_y > 0.4):
                 is_close_mob = True
             elif tiles_x <= 6.0 and tiles_y <= 6.0:
                 is_far_mob = True
@@ -536,15 +590,21 @@ class RucoyBot:
         now = time.time()
         if is_close_mob or is_far_mob:
             if now - self.last_attack_time > 0.20:
-                tag = "[BLISKI MOB <=3 - STAJĘ]" if is_close_mob else "[MOB W BIEGU]"
+                if has_spikes and is_close_mob:
+                    tag = f"[TRYB SAFE - KOLCE WIDOCZNE! <=4 kratki - STAJĘ I BIJĘ]"
+                elif is_close_mob:
+                    tag = "[BLISKI MOB <=3 - STAJĘ]"
+                else:
+                    tag = "[MOB W BIEGU]"
+
                 print(f"[FAST Combat] Strzelam ze skilla (Klawisz: {KEY_SPECIAL_ATTACK}) {tag}")
                 self.controller.press_key(KEY_SPECIAL_ATTACK)
                 self.last_attack_time = now
 
-            # ZATRZYMANIE RUCHU WYŁĄCZNIE DLA MOBÓW BARDZO BLISKO (<= 3 KRATKI)!
+            # ZATRZYMANIE RUCHU DLA BLISKICH MOBÓW (<=3 KRATKI LUB <=4 KRATKI W TRYBIE SAFE PRZY KOLCACH)
             if is_close_mob:
                 time.sleep(0.12)
-                return  # Wstrzymujemy marsz dopóki bliski mob w zasięgu 3 kratek nie zostanie zabity!
+                return  # Wstrzymujemy marsz dopóki bliski mob nie zostanie zabity!
             
         # 5. Priorytetyzacja ruchu (Wykonywana dopóki w zasięgu nie ma mobków)
         if can_get_loot:
@@ -690,8 +750,18 @@ def manual_crop_tool(win_mgr, target_type="lizard"):
     Ręczne wycinanie wariantów szablonu: target_type="lizard" lub target_type="item".
     Uruchamiane z rucoy_bot.py --calibrate (lub --calibrate-lizard / --calibrate-item)
     """
-    target_dir = ITEM_TEMPLATES_DIR if target_type == "item" else LIZARD_TEMPLATES_DIR
-    target_label = "PRZEDMIOTU (LOOT)" if target_type == "item" else "JASZCZURA"
+    if target_type == "item":
+        target_dir = ITEM_TEMPLATES_DIR
+        target_label = "PRZEDMIOTU (LOOT)"
+        prefix = "item"
+    elif target_type == "spike":
+        target_dir = SPIKE_TEMPLATES_DIR
+        target_label = "KOLCÓW (PUŁAPKI)"
+        prefix = "spike"
+    else:
+        target_dir = LIZARD_TEMPLATES_DIR
+        target_label = "JASZCZURA"
+        prefix = "lizard"
 
     print(f"\n--- Tryb ręcznej kalibracji szablonu {target_label} ---")
     win_mgr.focus_window()
@@ -734,7 +804,6 @@ def manual_crop_tool(win_mgr, target_type="lizard"):
     crop = screen[y:y + h, x:x + w]
 
     os.makedirs(target_dir, exist_ok=True)
-    prefix = "item" if target_type == "item" else "lizard"
     existing_files = [f for f in os.listdir(target_dir) if f.startswith(f"{prefix}_") and f.endswith(".png")]
     max_idx = 0
     for fname in existing_files:
@@ -785,6 +854,9 @@ def main():
     # Tryby kalibracji:
     if "--calibrate-item" in sys.argv:
         manual_crop_tool(win_mgr, target_type="item")
+        sys.exit(0)
+    elif "--calibrate-spike" in sys.argv or "--calibrate-spikes" in sys.argv:
+        manual_crop_tool(win_mgr, target_type="spike")
         sys.exit(0)
     elif "--calibrate" in sys.argv or "--calibrate-lizard" in sys.argv:
         manual_crop_tool(win_mgr, target_type="lizard")
