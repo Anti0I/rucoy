@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+debug/*.png
+preview_alignment.png
