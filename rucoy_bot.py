@@ -507,18 +507,21 @@ class RucoyBot:
             if loot_target:
                 print(f"[Vision][DEBUG] LOOT score={loot_score:.3f} target={loot_target}")
 
-        # Wyliczenie dystansu kafelkowego (6 kratek w każdą stronę: lewo, prawo, góra, dół - obszar wokół postaci)
+        # Wyliczenie dystansu kafelkowego i klasyfikacja bliskich/dalekich mobków (Branch: FAST)
         tile_size_px = 54.3
-        can_attack_mob = False
+        is_close_mob = False
+        is_far_mob = False
+
         if mob_target:
             dx = mob_target[0] - SCREEN_CENTER[0]
             dy = mob_target[1] - SCREEN_CENTER[1]
             tiles_x = abs(dx) / tile_size_px
             tiles_y = abs(dy) / tile_size_px
 
-            # Sprawdzamy dokładnie całe pole 6 kratek w każdą stronę wokół postaci (wykluczając samo centrum postaci)
-            if tiles_x <= 6.0 and tiles_y <= 6.0 and (tiles_x > 0.4 or tiles_y > 0.4):
-                can_attack_mob = True
+            if tiles_x <= 3.0 and tiles_y <= 3.0 and (tiles_x > 0.4 or tiles_y > 0.4):
+                is_close_mob = True
+            elif tiles_x <= 6.0 and tiles_y <= 6.0:
+                is_far_mob = True
 
         can_get_loot = False
         if loot_target:
@@ -529,16 +532,20 @@ class RucoyBot:
             if tiles_x_l <= 6.0 and tiles_y_l <= 6.0:
                 can_get_loot = True
 
-        # 4. Atakowanie jaszczurów w zasięgu 6 kratek (ZABIJAMY MOBKA ZANIM ZRROBIMY KROK TRASY!)
+        # 4. Atakowanie jaszczurów (Strzelanie ze skilla 'w')
         now = time.time()
-        if can_attack_mob:
-            if now - self.last_attack_time > 0.25:
-                print(f"[Combat] Likwiduję jaszczura przed krokiem trasy! Strzelam ze skilla (Klawisz: {KEY_SPECIAL_ATTACK})")
+        if is_close_mob or is_far_mob:
+            if now - self.last_attack_time > 0.20:
+                tag = "[BLISKI MOB <=3 - STAJĘ]" if is_close_mob else "[MOB W BIEGU]"
+                print(f"[FAST Combat] Strzelam ze skilla (Klawisz: {KEY_SPECIAL_ATTACK}) {tag}")
                 self.controller.press_key(KEY_SPECIAL_ATTACK)
                 self.last_attack_time = now
-                time.sleep(0.15)
-            return  # Wstrzymujemy ruch trasy, dopóki w zasięgu są żywe jaszczury!
 
+            # ZATRZYMANIE RUCHU WYŁĄCZNIE DLA MOBÓW BARDZO BLISKO (<= 3 KRATKI)!
+            if is_close_mob:
+                time.sleep(0.12)
+                return  # Wstrzymujemy marsz dopóki bliski mob w zasięgu 3 kratek nie zostanie zabity!
+            
         # 5. Priorytetyzacja ruchu (Wykonywana dopóki w zasięgu nie ma mobków)
         if can_get_loot:
             dx = loot_target[0] - SCREEN_CENTER[0]
