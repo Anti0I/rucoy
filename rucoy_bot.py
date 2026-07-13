@@ -632,17 +632,16 @@ class RucoyBot:
             time.sleep(walk_delay)
 
         else:
-            # Podążanie po nagranej trasie ROUTE (Pojedyncze czyste kliknięcie na wolne pole!)
+            # Podążanie po nagranej trasie ROUTE (Dokładnie 200ms między krokami!)
             if self.waypoints:
                 wp = self.waypoints[self.wp_index]
                 dx, dy = wp["dx"], wp["dy"]
                 tx = SCREEN_CENTER[0] + dx
                 ty = SCREEN_CENTER[1] + dy
 
-                total_tiles = max(1, int(round((abs(dx) + abs(dy)) / tile_size_px)))
-                step_delay = max(MIN_STEP_DELAY, total_tiles * MOVEMENT_SPEED_FACTOR)
+                step_delay = 0.20  # Dokładnie 200 ms opóźnienia między krokami trasy!
 
-                print(f"[FSM] ROUTE [{self.wp_index + 1}/{len(self.waypoints)}]. Krok ({dx}, {dy}) -> Odległość: {total_tiles} kratek")
+                print(f"[FSM] ROUTE [{self.wp_index + 1}/{len(self.waypoints)}]. Krok ({dx}, {dy}) (200ms)")
                 self.controller.click_relative(client_rect, tx, ty)
                 time.sleep(step_delay)
                 self.wp_index = (self.wp_index + 1) % len(self.waypoints)
