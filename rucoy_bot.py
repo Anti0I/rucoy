@@ -36,7 +36,6 @@ MOVEMENT_SPEED_FACTOR = 0.10  # Czas w sekundach na 1 kratkę (płynny marsz bez
 MIN_STEP_DELAY = 0.05          # Minimalne opóźnienie między krokami (brak przestojów)
 
 # Limity i ścieżki
-STUCK_TIME_LIMIT = 3.0  # Czas (w sekundach) braku ruchu przed odblokowaniem
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
 LIZARD_TEMPLATES_DIR = os.path.join(TEMPLATES_DIR, "lizard_variants")
@@ -419,8 +418,6 @@ class RucoyBot:
         self.controller = controller
 
         self.state = BotState.PATROL
-        self.last_screen = None
-        self.last_movement_time = time.time()
         self.last_attack_time = 0
         self.last_hp_pot_time = 0
         self.last_mana_pot_time = 0
@@ -463,22 +460,7 @@ class RucoyBot:
             print(f"[Route] Błąd podczas ładowania trasy {path}: {e}")
             return False
 
-    def get_screen_diff(self, current_screen):
-        if self.last_screen is None:
-            self.last_screen = current_screen
-            return 1.0
 
-        gray_curr = cv2.cvtColor(current_screen, cv2.COLOR_BGR2GRAY)
-        gray_last = cv2.cvtColor(self.last_screen, cv2.COLOR_BGR2GRAY)
-
-        if gray_curr.shape != gray_last.shape:
-            self.last_screen = current_screen
-            return 1.0
-
-        diff = cv2.absdiff(gray_curr, gray_last)
-        non_zero = np.count_nonzero(diff > 25)
-        self.last_screen = current_screen
-        return non_zero / (current_screen.shape[0] * current_screen.shape[1])
 
     def run_step(self):
         client_rect = self.window_mgr.get_client_rect()
@@ -502,23 +484,7 @@ class RucoyBot:
                 self.controller.press_key(KEY_MANA_POTION)
                 self.last_mana_pot_time = now_pot
 
-        # 2. Anti-Stuck Check
-        screen_diff = self.get_screen_diff(screen)
-        if screen_diff > 0.01:
-            self.last_movement_time = time.time()
-        elif time.time() - self.last_movement_time > STUCK_TIME_LIMIT:
-            print("[Anti-Stuck] Postać utknęła. Wykonuję skok awaryjny...")
-            rx = random.choice([-150, 150])
-            ry = random.choice([-150, 150])
-            self.controller.click_relative(client_rect, SCREEN_CENTER[0] + rx, SCREEN_CENTER[1] + ry)
-            self.last_movement_time = time.time()
-            time.sleep(1.0)
-            self.anchor_offset_x = 0.0
-            self.anchor_offset_y = 0.0
-            self.state = BotState.PATROL
-            return
-
-        # 3. Skanowanie wizualne z throttlingiem czasowym (NIE co klatkę!)
+        # 2. Skanowanie wizualne z throttlingiem czasowym (NIE co klatkę!)
         now_scan = time.time()
 
         # Lizardy: co 0.8s
