@@ -13,7 +13,7 @@ import pydirectinput
 # ==============================================================================
 # 1. KONFIGURACJA
 # ==============================================================================
-WINDOW_TITLE_SUBSTRING = "Nox"  # Szukane okno emulatora Nox
+WINDOW_TITLE_SUBSTRING = "BlueStacks"  # Szukane okno emulatora BlueStacks
 TARGET_RESOLUTION = (1600, 900)  # Docelowa rozdzielczość
 
 # Współrzędne pasków HP i Many (wyznaczone precyzyjnie z pikseli obrazu Nox 1600x900)
@@ -74,26 +74,29 @@ user32 = ctypes.windll.user32
 EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, ctypes.c_void_p)
 
 
-def enum_windows_callback(hwnd, extra_list):
+def enum_windows_callback(hwnd, extra_list, search_title="BlueStacks"):
     length = user32.GetWindowTextLengthW(hwnd)
     if length > 0:
         buffer = ctypes.create_unicode_buffer(length + 1)
         user32.GetWindowTextW(hwnd, buffer, length + 1)
         title = buffer.value
-        if user32.IsWindowVisible(hwnd) and ("Nox" in title or "nox" in title.lower()):
-            extra_list.append((hwnd, title))
+        if user32.IsWindowVisible(hwnd):
+            t_lower = title.lower()
+            s_lower = search_title.lower()
+            if s_lower in t_lower or "bluestacks" in t_lower or "hd-player" in t_lower or "nox" in t_lower:
+                extra_list.append((hwnd, title))
     return True
 
 
 class WindowManager:
-    def __init__(self, title_substring="Nox"):
+    def __init__(self, title_substring=WINDOW_TITLE_SUBSTRING):
         self.title_substring = title_substring
         self.hwnd = None
         self.window_title = ""
 
     def find_window(self):
         windows = []
-        callback = EnumWindowsProc(lambda hwnd, lparam: enum_windows_callback(hwnd, windows))
+        callback = EnumWindowsProc(lambda hwnd, lparam: enum_windows_callback(hwnd, windows, self.title_substring))
         user32.EnumWindows(callback, 0)
         if not windows:
             return False
@@ -465,7 +468,7 @@ class RucoyBot:
     def run_step(self):
         client_rect = self.window_mgr.get_client_rect()
         if not client_rect:
-            print("[Bot] Błąd: Brak dostępu do Nox Client.")
+            print("[Bot] Błąd: Brak dostępu do BlueStacks Client.")
             return
 
         screen = self.vision.capture_client_area(client_rect)
@@ -602,7 +605,7 @@ def record_route_tool(win_mgr, route_filename="l4_route.json"):
     out_path = os.path.join(ROUTES_DIR, route_filename)
 
     print(f"\n==================================================")
-    print(f"  TRYB NAGRYWANIA TRASY DLA NOX PLAYER: {route_filename}")
+    print(f"  TRYB NAGRYWANIA TRASY DLA BLUESTACKS: {route_filename}")
     print(f"==================================================")
     win_mgr.focus_window()
     win_mgr.resize_and_position(*TARGET_RESOLUTION)
@@ -610,13 +613,13 @@ def record_route_tool(win_mgr, route_filename="l4_route.json"):
 
     client_rect = win_mgr.get_client_rect()
     if not client_rect:
-        print("[-] Błąd: Nie można pobrać wymiarów okna Nox.")
+        print("[-] Błąd: Nie można pobrać wymiarów okna BlueStacks.")
         return False
 
     recorded_waypoints = []
     print("[*] --- INSTRUKCJA ---")
-    print("[*] 1. Przejdź do okna Nox Playera i KLIKAJ MYSZĄ BEZPOŚREDNIO W GRZE tak jak zwykle grasz.")
-    print("[*] 2. Możesz bójkę, zbierać loot i chodzić – skrypt sam wykrywa Twoje kliknięcia w oknie Noxa!")
+    print("[*] 1. Przejdź do okna BlueStacks i KLIKAJ MYSZĄ BEZPOŚREDNIO W GRZE tak jak zwykle grasz.")
+    print("[*] 2. Możesz bójkę, zbierać loot i chodzić – skrypt sam wykrywa Twoje kliknięcia w oknie BlueStacks!")
     print("[*] 3. Gdy przejdziesz całe kółko L4, naciśnij ENTER lub q w tym oknie konsoli (lub Ctrl+C), aby zapisać trasę.\n")
 
     user32 = ctypes.windll.user32
@@ -642,14 +645,14 @@ def record_route_tool(win_mgr, route_filename="l4_route.json"):
                 rel_x = pt.x - client_rect["left"]
                 rel_y = pt.y - client_rect["top"]
 
-                # Sprawdzamy czy kliknięcie nastąpiło wewnątrz obszaru gry w Noxie
+                # Sprawdzamy czy kliknięcie nastąpiło wewnątrz obszaru gry w BlueStacks
                 if 0 <= rel_x <= client_rect["width"] and 0 <= rel_y <= client_rect["height"]:
                     # Ignorujemy kliknięcia w Paski UI (Górne menu, Czat na dole, panel umiejętności)
                     if not (rel_y < 100 or rel_y > 800 or rel_x < 150 or (rel_y > 600 and rel_x > 1400)):
                         dx = rel_x - SCREEN_CENTER[0]
                         dy = rel_y - SCREEN_CENTER[1]
                         recorded_waypoints.append({"dx": int(dx), "dy": int(dy)})
-                        print(f"[+ Krok {len(recorded_waypoints)}] Zarejestrowano klik w Noxie: rel=({rel_x}, {rel_y}) -> Wektor ({dx}, {dy})")
+                        print(f"[+ Krok {len(recorded_waypoints)}] Zarejestrowano klik w BlueStacks: rel=({rel_x}, {rel_y}) -> Wektor ({dx}, {dy})")
 
             elif not is_down:
                 was_pressed = False
@@ -701,7 +704,7 @@ def manual_crop_tool(win_mgr, target_type="lizard"):
 
     client_rect = win_mgr.get_client_rect()
     if not client_rect:
-        print("[-] Błąd: Nie można pobrać wymiarów okna Nox.")
+        print("[-] Błąd: Nie można pobrać wymiarów okna BlueStacks.")
         return False
 
     print(f"[*] Ustaw widok tak, aby {target_label} był widoczny na mapie.")
@@ -764,7 +767,7 @@ def main():
 
     win_mgr = WindowManager(WINDOW_TITLE_SUBSTRING)
     if not win_mgr.find_window():
-        print("[-] Błąd: Nie znaleziono emulatora Nox Player! Upewnij się, że jest włączony.")
+        print("[-] Błąd: Nie znaleziono emulatora BlueStacks! Upewnij się, że jest włączony.")
         sys.exit(1)
 
     print(f"[Init] Znaleziono okno emulatora: '{win_mgr.window_title}'")
@@ -819,7 +822,7 @@ def main():
     bot = RucoyBot(win_mgr, vision, controller, route_filename=selected_route)
 
     print("\n[+] Wszystko gotowe! Uruchamiam pętlę bota za 5 sekund...")
-    print("[+] Przełącz teraz na okno Nox Playera.")
+    print("[+] Przełącz teraz na okno BlueStacks.")
     for i in range(5, 0, -1):
         print(f"{i}...")
         time.sleep(1.0)
