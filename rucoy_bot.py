@@ -46,7 +46,7 @@ ROUTES_DIR = os.path.join(BASE_DIR, "routes")
 DEBUG_DIR = os.path.join(BASE_DIR, "debug")
 
 # --- Ustawienia detekcji, kolców i smyczy bojowej ---
-MATCH_THRESHOLD = 0.60          # Próg wykrywania jaszczurów (60% zgodności)
+MATCH_THRESHOLD = 0.55          # Próg wykrywania jaszczurów (55% zgodności)
 ITEM_MATCH_THRESHOLD = 0.65     # Próg wykrywania leżącego lootu
 SPIKE_MATCH_THRESHOLD = 0.60    # Próg wykrywania kolców pułapek (60% zgodności)
 MAX_ATTACK_DIST_PX = 270        # Maksymalny dystans do moba (blizej niz 5 kratek, ok. 270px)
@@ -147,9 +147,12 @@ class WindowManager:
 class GameVision:
     def __init__(self):
         self.sct = mss.MSS()
-        self.templates = []
+        self.templates = []          # pełna rozdzielczość
+        self.templates_small = []    # przeskalowane 50% do szybkiego skanowania
         self.item_templates = []
+        self.item_templates_small = []
         self.spike_templates = []
+        self.spike_templates_small = []
         self.load_templates()
         self.load_item_templates()
         self.load_spike_templates()
@@ -167,6 +170,7 @@ class GameVision:
             tpl = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
             if tpl is not None and tpl.size > 0:
                 self.templates.append(tpl)
+                self.templates_small.append(cv2.resize(tpl, None, fx=VISION_DOWNSCALE, fy=VISION_DOWNSCALE))
 
         if self.templates:
             print(f"[Vision] Załadowano {len(self.templates)} wariantów szablonu jaszczura.")
@@ -184,6 +188,7 @@ class GameVision:
             tpl = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
             if tpl is not None and tpl.size > 0:
                 self.item_templates.append(tpl)
+                self.item_templates_small.append(cv2.resize(tpl, None, fx=VISION_DOWNSCALE, fy=VISION_DOWNSCALE))
 
         if self.item_templates:
             print(f"[Vision] Załadowano {len(self.item_templates)} wariantów szablonu lootu.")
@@ -201,6 +206,7 @@ class GameVision:
             tpl = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
             if tpl is not None and tpl.size > 0:
                 self.spike_templates.append(tpl)
+                self.spike_templates_small.append(cv2.resize(tpl, None, fx=VISION_DOWNSCALE, fy=VISION_DOWNSCALE))
 
         if self.spike_templates:
             print(f"[Vision] Załadowano {len(self.spike_templates)} wariantów szablonu kolców.")
@@ -234,11 +240,16 @@ class GameVision:
         Wyszukuje wszystkie dopasowania na ekranie, wylicza dystans euklidesowy
         do środka ekranu (gracza) i zwraca NAJBLIŻSZY cel.
         """
-        if not self.templates:
+        if not self.templates_small:
             return None, 0.0
 
-        img_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-        img_gray = self._mask_ui(img_gray)
+        img_small = cv2.resize(img_bgr, None, fx=VISION_DOWNSCALE, fy=VISION_DOWNSCALE)
+        img_gray = cv2.cvtColor(img_small, cv2.COLOR_BGR2GRAY)
+        h_s, w_s = img_gray.shape[:2]
+        img_gray[0:int(50*VISION_DOWNSCALE), :] = 0
+        img_gray[int(400*VISION_DOWNSCALE):, :] = 0
+        img_gray[:, 0:int(75*VISION_DOWNSCALE)] = 0
+        scale_back = 1.0 / VISION_DOWNSCALE
 
         best_score = 0.0
         closest_target = None
@@ -248,33 +259,34 @@ class GameVision:
 
         center_x, center_y = SCREEN_CENTER
 
-        for template in self.templates:
-            for scale in SCALE_RANGE:
-                resized = cv2.resize(template, None, fx=scale, fy=scale)
-                th, tw = resized.shape[:2]
-                if th >= img_gray.shape[0] or tw >= img_gray.shape[1]:
-                    continue
-                
-                result = cv2.matchTemplate(img_gray, resized, cv2.TM_CCOEFF_NORMED)
-                locs = np.where(result >= threshold)
-                
-                for pt in zip(*locs[::-1]):
-                    score = result[pt[1], pt[0]]
-                    if score > best_score:
-                        best_score = score
-                    
-                    cx = pt[0] + tw // 2
-                    cy = pt[1] + th // 2
-                    dist = np.sqrt((cx - center_x) ** 2 + (cy - center_y) ** 2)
-                    
-                    if dist < closest_dist:
-                        closest_dist = dist
-                        closest_target = (cx, cy + th + 25)
-                        best_loc = pt
-                        best_size = (th, tw)
+        center_x_s = int(center_x * VISION_DOWNSCALE)
+        center_y_s = int(center_y * VISION_DOWNSCALE)
 
-        if DEBUG_MODE and best_loc is not None:
-            self._save_debug_frame(img_bgr, best_loc, best_size, best_score, threshold)
+        for template in self.templates_small:
+            th, tw = template.shape[:2]
+            if th >= img_gray.shape[0] or tw >= img_gray.shape[1]:
+                continue
+            
+            result = cv2.matchTemplate(img_gray, template, cv2.TM_CCOEFF_NORMED)
+            locs = np.where(result >= threshold)
+            
+            for pt in zip(*locs[::-1]):
+                score = result[pt[1], pt[0]]
+                if score > best_score:
+                    best_score = score
+                
+                cx = pt[0] + tw // 2
+                cy = pt[1] + th // 2
+                dist = np.sqrt((cx - center_x_s) ** 2 + (cy - center_y_s) ** 2)
+                
+                if dist < closest_dist:
+                    closest_dist = dist
+                    # Przelicz współrzędne z powrotem na pełną rozdzielczość
+                    real_cx = int(cx * scale_back)
+                    real_cy = int(cy * scale_back)
+                    closest_target = (real_cx, real_cy + int(th * scale_back) + 25)
+                    best_loc = pt
+                    best_size = (th, tw)
 
         return closest_target, best_score
 
@@ -283,11 +295,15 @@ class GameVision:
         Wyszukuje przedmioty leżące na podłodze. Zwraca najbliższy loot (pozycja środka przedmiotu)
         oraz najwyższy wynik dopasowania.
         """
-        if not self.item_templates:
+        if not self.item_templates_small:
             return None, 0.0
 
-        img_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-        img_gray = self._mask_ui(img_gray)
+        img_small = cv2.resize(img_bgr, None, fx=VISION_DOWNSCALE, fy=VISION_DOWNSCALE)
+        img_gray = cv2.cvtColor(img_small, cv2.COLOR_BGR2GRAY)
+        img_gray[0:int(50*VISION_DOWNSCALE), :] = 0
+        img_gray[int(400*VISION_DOWNSCALE):, :] = 0
+        img_gray[:, 0:int(75*VISION_DOWNSCALE)] = 0
+        scale_back = 1.0 / VISION_DOWNSCALE
 
         best_score = 0.0
         closest_target = None
@@ -297,33 +313,31 @@ class GameVision:
 
         center_x, center_y = SCREEN_CENTER
 
-        for template in self.item_templates:
-            for scale in SCALE_RANGE:
-                resized = cv2.resize(template, None, fx=scale, fy=scale)
-                th, tw = resized.shape[:2]
-                if th >= img_gray.shape[0] or tw >= img_gray.shape[1]:
-                    continue
-                
-                result = cv2.matchTemplate(img_gray, resized, cv2.TM_CCOEFF_NORMED)
-                locs = np.where(result >= threshold)
-                
-                for pt in zip(*locs[::-1]):
-                    score = result[pt[1], pt[0]]
-                    if score > best_score:
-                        best_score = score
-                    
-                    cx = pt[0] + tw // 2
-                    cy = pt[1] + th // 2
-                    dist = np.sqrt((cx - center_x) ** 2 + (cy - center_y) ** 2)
-                    
-                    if dist < closest_dist:
-                        closest_dist = dist
-                        closest_target = (cx, cy)
-                        best_loc = pt
-                        best_size = (th, tw)
+        center_x_s = int(center_x * VISION_DOWNSCALE)
+        center_y_s = int(center_y * VISION_DOWNSCALE)
 
-        if DEBUG_MODE and best_loc is not None:
-            self._save_loot_debug_frame(img_bgr, best_loc, best_size, best_score, threshold)
+        for template in self.item_templates_small:
+            th, tw = template.shape[:2]
+            if th >= img_gray.shape[0] or tw >= img_gray.shape[1]:
+                continue
+            
+            result = cv2.matchTemplate(img_gray, template, cv2.TM_CCOEFF_NORMED)
+            locs = np.where(result >= threshold)
+            
+            for pt in zip(*locs[::-1]):
+                score = result[pt[1], pt[0]]
+                if score > best_score:
+                    best_score = score
+                
+                cx = pt[0] + tw // 2
+                cy = pt[1] + th // 2
+                dist = np.sqrt((cx - center_x_s) ** 2 + (cy - center_y_s) ** 2)
+                
+                if dist < closest_dist:
+                    closest_dist = dist
+                    closest_target = (int(cx * scale_back), int(cy * scale_back))
+                    best_loc = pt
+                    best_size = (th, tw)
 
         return closest_target, best_score
 
@@ -333,25 +347,23 @@ class GameVision:
         Zwraca True/False w zależności od tego, czy znaleziono kolce o dopasowaniu >= threshold
         oraz najwyższy wynik dopasowania.
         """
-        if not self.spike_templates:
+        if not self.spike_templates_small:
             return False, 0.0
 
-        img_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-        img_gray = self._mask_ui(img_gray)
+        img_small = cv2.resize(img_bgr, None, fx=VISION_DOWNSCALE, fy=VISION_DOWNSCALE)
+        img_gray = cv2.cvtColor(img_small, cv2.COLOR_BGR2GRAY)
 
         best_score = 0.0
 
-        for template in self.spike_templates:
-            for scale in SCALE_RANGE:
-                resized = cv2.resize(template, None, fx=scale, fy=scale)
-                th, tw = resized.shape[:2]
-                if th >= img_gray.shape[0] or tw >= img_gray.shape[1]:
-                    continue
-                
-                result = cv2.matchTemplate(img_gray, resized, cv2.TM_CCOEFF_NORMED)
-                min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
-                if max_val > best_score:
-                    best_score = max_val
+        for template in self.spike_templates_small:
+            th, tw = template.shape[:2]
+            if th >= img_gray.shape[0] or tw >= img_gray.shape[1]:
+                continue
+            
+            result = cv2.matchTemplate(img_gray, template, cv2.TM_CCOEFF_NORMED)
+            min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+            if max_val > best_score:
+                best_score = max_val
 
         has_spikes = best_score >= threshold
         return has_spikes, best_score
@@ -424,11 +436,10 @@ pydirectinput.FAILSAFE = False
 
 
 class GameController:
-    def click_relative(self, client_rect, relative_x, relative_y, jitter=5):
+    def click_relative(self, client_rect, relative_x, relative_y, jitter=3):
         abs_x = client_rect["left"] + relative_x + random.randint(-jitter, jitter)
         abs_y = client_rect["top"] + relative_y + random.randint(-jitter, jitter)
         pydirectinput.moveTo(abs_x, abs_y)
-        time.sleep(random.uniform(0.02, 0.05))
         pydirectinput.click()
 
     def press_key(self, key):
@@ -518,7 +529,6 @@ class RucoyBot:
         return non_zero / (current_screen.shape[0] * current_screen.shape[1])
 
     def run_step(self):
-        self.window_mgr.focus_window()
         client_rect = self.window_mgr.get_client_rect()
         if not client_rect:
             print("[Bot] Błąd: Brak dostępu do Nox Client.")
