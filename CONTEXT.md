@@ -19,11 +19,12 @@ Projekt opiera się na samodzielnym skrypcie w języku Python ([rucoy_bot.py](fi
 ## 2. Gałęzie Git (Branching Strategy)
 
 * **`master`:** Stabilna wersja bazowa z tradycyjnym sekwencyjnym podchodzeniem.
-* **`FAST` (AKTYWNA GAŁĄŹ):** Wersja wysoce zoptymalizowana:
+* **`FAST`:** Zoptymalizowana gałąź dla Nox Player.
+* **`bluestack` (AKTYWNA GAŁĄŹ):** Adaptacja bota dla emulatora BlueStacks / HD-Player:
+  - Automatyczne wyszukiwanie i dopasowywanie okna `BlueStacks` / `HD-Player`.
   - Stałe tempo 200 ms (`step_delay = 0.20`) na każdy krok trasy.
   - Płynny marsz non-stop bez zatrzymywania się (nieblokująca walka i leczenie).
-  - Strzelanie ze skilla `'w'` oraz picie mikstur leczenia/many odbywa się symultanicznie podczas ruchu.
-  - Pre-downscaling wizji o 50% (`VISION_DOWNSCALE = 0.5`) dla 4-krotnego przyspieszenia analizy obrazu.
+  - Pre-downscaling wizji o 50% (`VISION_DOWNSCALE = 0.5`) dla 4-krotnego przyspieszenia detekcji.
   - Throttling czasowy skanowania: Jaszczury (0.8 s), Loot (1.3 s).
 
 ---
