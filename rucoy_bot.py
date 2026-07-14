@@ -52,8 +52,9 @@ SPIKE_MATCH_THRESHOLD = 0.60    # Próg wykrywania kolców pułapek (60% zgodno�
 MAX_ATTACK_DIST_PX = 270        # Maksymalny dystans do moba (blizej niz 5 kratek, ok. 270px)
 LEASH_MAX_TILES_X = 6           # Maksymalne odchylenie w osi X od kotwicy trasy (6 kratek)
 LEASH_MAX_TILES_Y = 4           # Maksymalne odchylenie w osi Y od kotwicy trasy (4 kratki)
-SCALE_RANGE = np.linspace(0.92, 1.08, 3)  # Zoptymalizowany zakres skalowania (3 skale dla błyskawicznego wykrywania)
-DEBUG_MODE = False              # Wyłączony zapis na dysk dla maksymalnej płynności i braku zacinek
+SCALE_RANGE = np.array([1.0])           # Jedna skala (mamy wystarczająco dużo wariantów szablonów)
+DEBUG_MODE = False                       # Wyłączony zapis na dysk dla maksymalnej płynności
+VISION_DOWNSCALE = 0.5                   # Przeskalowanie obrazu do 50% przy skanowaniu (4x szybciej)
 
 # Wirtualny środek ekranu (pozycja naszej postaci)
 SCREEN_CENTER = (800, 450)
@@ -619,27 +620,22 @@ class RucoyBot:
             if tiles_x_l <= 6.0 and tiles_y_l <= 6.0:
                 can_get_loot = True
 
-        # 4. Atakowanie jaszczurów (Strzelanie ze skilla 'w')
+        # 4. Atakowanie jaszczurów (Strzelanie ze skilla 'w') — NIE BLOKUJE RUCHU!
         now = time.time()
         if is_close_mob or is_far_mob:
             if now - self.last_attack_time > 0.20:
                 if has_spikes and is_close_mob:
-                    tag = f"[TRYB SAFE - KOLCE WIDOCZNE! <=4 kratki - STAJĘ I BIJĘ]"
+                    tag = f"[TRYB SAFE - KOLCE! <=4 kratki]"
                 elif is_close_mob:
-                    tag = "[BLISKI MOB <=3 - STAJĘ]"
+                    tag = "[BLISKI MOB <=3]"
                 else:
                     tag = "[MOB W BIEGU]"
 
-                print(f"[FAST Combat] Strzelam ze skilla (Klawisz: {KEY_SPECIAL_ATTACK}) {tag}")
+                print(f"[Combat] Skill '{KEY_SPECIAL_ATTACK}' {tag}")
                 self.controller.press_key(KEY_SPECIAL_ATTACK)
                 self.last_attack_time = now
 
-            # ZATRZYMANIE RUCHU DLA BLISKICH MOBÓW (<=3 KRATKI LUB <=4 KRATKI W TRYBIE SAFE PRZY KOLCACH)
-            if is_close_mob:
-                time.sleep(0.12)
-                return  # Wstrzymujemy marsz dopóki bliski mob nie zostanie zabity!
-            
-        # 5. Priorytetyzacja ruchu (Wykonywana dopóki w zasięgu nie ma mobków)
+        # 5. RUCH — ZAWSZE się wykonuje (potki/strzały nie blokują!)
         if can_get_loot:
             dx = loot_target[0] - SCREEN_CENTER[0]
             dy = loot_target[1] - SCREEN_CENTER[1]
@@ -647,11 +643,10 @@ class RucoyBot:
             total_tiles = max(1, int(round((abs(dx) + abs(dy)) / tile_size_px)))
             walk_delay = max(MIN_STEP_DELAY, total_tiles * MOVEMENT_SPEED_FACTOR)
 
-            print(f"[FSM] LOOT DETECTED! Dystans: {total_tiles} kratek (|dx|={abs(dx)}, |dy|={abs(dy)}). Podchodzę na pozycję {loot_target}...")
+            print(f"[FSM] LOOT DETECTED! Dystans: {total_tiles} kratek. Podchodzę na pozycję {loot_target}...")
             self.controller.click_relative(client_rect, loot_target[0], loot_target[1])
             time.sleep(walk_delay)
 
-            print(f"[FSM] Zbieram loot klawiszem '{KEY_LOOT}'...")
             self.controller.press_key(KEY_LOOT)
             time.sleep(0.05)
             self.controller.press_key(KEY_LOOT)
@@ -660,19 +655,18 @@ class RucoyBot:
             # Powrót do miejsca wyjściowego
             return_x = SCREEN_CENTER[0] - dx
             return_y = SCREEN_CENTER[1] - dy
-            print(f"[FSM] Powracam na pozycję wyjściową sprzed zebrania lootu: ({return_x}, {return_y})...")
             self.controller.click_relative(client_rect, return_x, return_y)
             time.sleep(walk_delay)
 
         else:
-            # Podążanie po nagranej trasie ROUTE (Dokładnie 200ms między krokami!)
+            # Podążanie po nagranej trasie ROUTE (200ms między krokami)
             if self.waypoints:
                 wp = self.waypoints[self.wp_index]
                 dx, dy = wp["dx"], wp["dy"]
                 tx = SCREEN_CENTER[0] + dx
                 ty = SCREEN_CENTER[1] + dy
 
-                step_delay = 0.20  # Dokładnie 200 ms opóźnienia między krokami trasy!
+                step_delay = 0.20  # 200ms
 
                 print(f"[FSM] ROUTE [{self.wp_index + 1}/{len(self.waypoints)}]. Krok ({dx}, {dy}) (200ms)")
                 self.controller.click_relative(client_rect, tx, ty)
