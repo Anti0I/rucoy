@@ -11,8 +11,8 @@ Projekt opiera się na samodzielnym skrypcie w języku Python ([rucoy_bot.py](fi
 ### Wykorzystywane biblioteki:
 * `win32gui`, `win32process`, `win32api` – bezpośrednie sterowanie oknem Nox Player bez przenoszenia kursorów użytkownika.
 * `mss` – szybkie zrzuty ekranu pamięci podręcznej RAM.
-* `opencv-python (cv2)` – detekcja wzorców, czytanie pętli zdrowia/many, rozpoznawanie kolców i lootu (`cv2.matchTemplate`).
-* `numpy` – numeryczne przeliczanie macierzy pikseli i weryfikacja ruchu `get_screen_diff`.
+* `opencv-python (cv2)` – detekcja wzorców, czytanie pasków zdrowia/many oraz lootu (`cv2.matchTemplate`).
+* `numpy` – numeryczne przeliczanie macierzy pikseli i skalowanie.
 
 ---
 
@@ -21,9 +21,10 @@ Projekt opiera się na samodzielnym skrypcie w języku Python ([rucoy_bot.py](fi
 * **`master`:** Stabilna wersja bazowa z tradycyjnym sekwencyjnym podchodzeniem.
 * **`FAST` (AKTYWNA GAŁĄŹ):** Wersja wysoce zoptymalizowana:
   - Stałe tempo 200 ms (`step_delay = 0.20`) na każdy krok trasy.
-  - Płynny marsz non-stop bez zatrzymywania się.
-  - Strzelanie ze skilla `'w'` asynchronicznie w biegu (`[MOB W BIEGU]`) do mobów oddalonych o 4–6 kratek.
-  - Zatrzymanie tylko dla bliskich mobów ($\le 3$ kratki) lub podczas aktywnego **Trybu SAFE** przy kolcach ($\le 4$ kratki).
+  - Płynny marsz non-stop bez zatrzymywania się (nieblokująca walka i leczenie).
+  - Strzelanie ze skilla `'w'` oraz picie mikstur leczenia/many odbywa się symultanicznie podczas ruchu.
+  - Pre-downscaling wizji o 50% (`VISION_DOWNSCALE = 0.5`) dla 4-krotnego przyspieszenia analizy obrazu.
+  - Throttling czasowy skanowania: Jaszczury (0.8 s), Loot (1.3 s).
 
 ---
 
@@ -35,26 +36,25 @@ c:/VS/rucoy/
 ├── CONTEXT.md                  # Pełny dokument kontekstowy projektu
 ├── .gitignore                  # Ignorowane pliki tymczasowe i pamięć podręczna Pythona
 ├── routes/
-│   └── l4_route.json           # Ścieżka patrolowa L4 (464 precyzyjne waypointy)
+│   └── l4_route.json           # Ścieżka patrolowa L4 (248 precyzyjnych waypointów)
 └── templates/
-    ├── lizard_variants/        # 9 wariantów graficznych jaszczurów (lizard_1.png - lizard_9.png)
-    ├── item_variants/          # 5 wariantów leżącego lootu (item_1.png - item_5.png)
-    └── spike_variants/         # 3 warianty pułapek z kolcami (spike_1.png - spike_3.png)
+    ├── lizard_variants/        # Warianty graficzne jaszczurów
+    └── item_variants/          # Warianty leżącego lootu
 ```
 
 ---
 
 ## 4. Parametry Konfiguracji i Progi Działania
 
-Wszystkie parametry sterujące znajdują się na początku pliku [rucoy_bot.py](file:///c:/VS/rucoy/rucoy_bot.py#L20-L55):
+Wszystkie parametry sterujące znajdują się na początku pliku [rucoy_bot.py](file:///c:/VS/rucoy/rucoy_bot.py#L20-L60):
 
 | Parametr | Wartość | Opis |
 | :--- | :--- | :--- |
 | **Interpreter Python** | `C:/Users/inetk/AppData/Local/Microsoft/WindowsApps/python3.12.exe` | Pełna ścieżka do Pythona 3.12 w systemie Windows. |
 | **Emulator** | Nox Player (1600x900) | Tytuł okna: `'Nox'`. Okno automatycznie pozycjonowane przez `WindowManager`. |
-| `MATCH_THRESHOLD` | `0.60` (60%) | Próg czułości OpenCV dla jaszczurów. |
-| `ITEM_MATCH_THRESHOLD` | `0.65` (65%) | Próg czułości wykrywania lootu. |
-| `SPIKE_MATCH_THRESHOLD` | `0.60` (60%) | Próg czułości wykrywania pułapek z kolcami. |
+| `MATCH_THRESHOLD` | `0.55` (55%) | Próg czułości OpenCV dla jaszczurów. |
+| `ITEM_MATCH_THRESHOLD` | `0.50` (50%) | Próg czułości wykrywania lootu. |
+| `VISION_DOWNSCALE` | `0.5` (50%) | Przeskalowanie obrazu ekranu i szablonów do 50% (4x szybsza detekcja). |
 | `WAYPOINT_STEP_DELAY` | `0.20` s (200 ms) | Stałe tempo wykonywania pojedynczych kroków trasowania w trybie FAST. |
 | `HP_POTION_THRESHOLD` | `0.75` (75%) | Poniżej 3/4 HP używana jest mikstura leczenia (Klawisz: `'3'`). Pasek odczytywany na $X=400, Y=18..38$. |
 | `MANA_POTION_THRESHOLD` | `0.50` (50%) | Poniżej 1/2 Mana używana jest mikstura many (Klawisz: `'1'`). Pasek odczytywany na $X=400, Y=45..54$. |
@@ -89,26 +89,22 @@ Wszystkie komendy uruchamiane są z poziomu konsoli PowerShell za pomocą pełne
 & C:/Users/inetk/AppData/Local/Microsoft/WindowsApps/python3.12.exe rucoy_bot.py --calibrate-item
 ```
 
-### 5. Kalibracja i dodawanie szablonów kolców pułapek:
-```bash
-& C:/Users/inetk/AppData/Local/Microsoft/WindowsApps/python3.12.exe rucoy_bot.py --calibrate-spike
-```
-
 ---
 
-## 6. Szczegóły Logiki Walki i Trybu SAFE w Branchu `FAST`
+## 6. Schemat Działania Pętli Głównej (Branch `FAST`)
 
 ```mermaid
 graph TD
-    A[Skanuj klatkę z gry w RAM] --> B{Czy wykryto Kolce? score >= 0.60}
-    B -- Tak --> C[Aktywuj Tryb SAFE: Strefa zatrzymania = 4 kratki]
-    B -- Nie --> D[Tryb Normalny FAST: Strefa zatrzymania = 3 kratki]
-    C --> E{Czy jaszczur w strefie zatrzymania?}
-    D --> E
-    E -- Tak --> F[Wstrzymaj ruch + Strzał ze skilla 'w']
-    E -- Nie --> G{Czy jest leżący Loot?}
-    G -- Tak --> H[Podejdź do lootu -> Klawisz 'h' -> Powrót na punkt]
-    G -- Nie --> I[Wykonaj pojedynczy krok trasy - Stałe tempo 200 ms]
+    A[Zrzut ekranu Nox RAM] --> B[Sprawdzenie Pasków HP / Mana -> Użycie Potki bez opóźnień]
+    B --> C{Skanowanie Wizji z Throttlingiem}
+    C -- Co 0.8s --> D[Skan Jaszczurów 50% Downscale]
+    C -- Co 1.3s --> E[Skan Lootu 50% Downscale]
+    D & E --> F{Czy mob w zasięgu?}
+    F -- Tak --> G[Wyślij Skill 'w' - Nie blokuje ruchu!]
+    F -- Nie / Po wysłaniu skilla --> H{Czy pod nogami jest Loot?}
+    H -- Tak --> I[Podejdź do lootu -> Klawisz 'h' -> Powrót na trasę]
+    H -- Nie --> J[Pobierz kolejny Waypoint z trasy]
+    J --> K[Wykonaj pojedynczy krok trasy - 200 ms]
 ```
 
 ---
@@ -116,8 +112,10 @@ graph TD
 ## 7. Historia Zmian i Osiągnięć (Dziennik Prac)
 
 1. **Optymalizacja wydajności I/O (`DEBUG_MODE = False`):** Usunięto zapisywanie plików obrazów z pamięci dyskowej na każdej klatce. Czas analizy skrócił się z $300-500\text{ms}$ do $<10\text{ms}$.
-2. **Rozwiązanie problemu tekstu na paskach HP/Mana:** Przesunięto badanie pikseli z zakłóconego tekstem obszaru środkowego na czysty punkt $X=400$, uniezależniając bota od napisu `4,279/4,285`.
-3. **Optymalizacja OpenCV Matching:** Skrócono `SCALE_RANGE` do 3 skal (`np.linspace(0.92, 1.08, 3)`), uzyskując 2.3-krotne przyspieszenie wykrywania graficznego.
-4. **Naprawa auto-inkrementacji nazw szablonów:** Wyliczanie `max_idx + 1` chroni pliki w folderach `lizard_variants`, `item_variants` i `spike_variants` przed nadpisywaniem.
-5. **Wdrożenie dynamicznego Trybu SAFE:** Automatyczne rozpoznawanie kolców, płynne zwiększanie strefy wstrzymywania kroku do 4 kratek i samoczynny powrót do pełnego tempa 200 ms po wyjściu ze strefy zagrożenia.
-6. **Integracja z Repozytorium Git:** Stworzono repozytorium, dodano plik `.gitignore` i utworzono wydajną gałąź roboczą `FAST`.
+2. **Rozwiązanie problemu tekstalnego na paskach HP/Mana:** Przesunięto badanie pikseli z zakłóconego tekstem obszaru środkowego na czysty punkt $X=400$, uniezależniając bota od napisu `4,279/4,285`.
+3. **Pojedyncza Skala i 50% Downscaling Wizji (`VISION_DOWNSCALE = 0.5`):** Przeskalowanie zrzutu ekranu i szablonów o 50% dało 4-krotny skok wydajności skanowania (z ~300ms do ~60-90ms).
+4. **Throttling skanowania wizualnego:** Odseparowanie skanowania jaszczurów (0.8s) i lootu (1.3s) z buforowaniem wyników w pamięci RAM. Dzięki temu 80% klatek wykonuje się natychmiastowo w reżimie 200 ms.
+5. **Nieblokująca walka i poruszanie się:** Skille oraz potki są wysyłane asynchronicznie (fire-and-forget), a bota nie zatrzymują już animacje ani sztuczne pauzy `time.sleep` w trakcie strzelania.
+6. **Usunięcie opóźnień sterownika:** Usunięto `time.sleep` z `click_relative` oraz zbędne wywołania `focus_window()` na każdej klatce.
+7. **Usunięcie SAFE Mode & Kolców:** Na prośbę użytkownika całkowicie wycięto logikę kolców i trybu SAFE dla uproszczenia i przyspieszenia poruszania się.
+8. **Usunięcie systemu Anti-Stuck:** Wyeliminowano algorytm wykrywania zacięć (`get_screen_diff`), zapobiegając fałszywym odskokom awaryjnym i zniekształcaniu trasy.
