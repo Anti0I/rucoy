@@ -459,8 +459,19 @@ class RucoyBot:
         self.last_hp_pot_time = 0
         self.last_mana_pot_time = 0
 
-        self.anchor_offset_x = 0.0  # Sumaryczne przesunięcie X w kratkach od kotwicy trasy
-        self.anchor_offset_y = 0.0  # Sumaryczne przesunięcie Y w kratkach od kotwicy trasy
+        self.anchor_offset_x = 0.0
+        self.anchor_offset_y = 0.0
+
+        # Timery i cache skanowania wizualnego (throttling)
+        self.last_lizard_scan_time = 0
+        self.last_loot_scan_time = 0
+        self.last_spike_scan_time = 0
+        self.cached_mob_target = None
+        self.cached_mob_score = 0.0
+        self.cached_loot_target = None
+        self.cached_loot_score = 0.0
+        self.cached_has_spikes = False
+        self.cached_spike_score = 0.0
 
         self.waypoints = []
         self.wp_index = 0
@@ -545,18 +556,30 @@ class RucoyBot:
             self.state = BotState.PATROL
             return
 
-        # 3. Skanowanie potworów, podłogi (LOOT) oraz kolców (SPIKES)
-        mob_target, mob_score = self.vision.find_lizard_target(screen)
-        loot_target, loot_score = self.vision.find_loot_target(screen)
-        has_spikes, spike_score = self.vision.find_spike_target(screen)
+        # 3. Skanowanie wizualne z throttlingiem czasowym (NIE co klatkę!)
+        now_scan = time.time()
 
-        if DEBUG_MODE:
-            if mob_target:
-                print(f"[Vision][DEBUG] MOB score={mob_score:.3f} target={mob_target}")
-            if loot_target:
-                print(f"[Vision][DEBUG] LOOT score={loot_score:.3f} target={loot_target}")
-            if has_spikes:
-                print(f"[Vision][DEBUG] SPIKES score={spike_score:.3f}")
+        # Lizardy: co 0.8s
+        if now_scan - self.last_lizard_scan_time > 0.8:
+            self.cached_mob_target, self.cached_mob_score = self.vision.find_lizard_target(screen)
+            self.last_lizard_scan_time = now_scan
+
+        # Loot: co 1.3s
+        if now_scan - self.last_loot_scan_time > 1.3:
+            self.cached_loot_target, self.cached_loot_score = self.vision.find_loot_target(screen)
+            self.last_loot_scan_time = now_scan
+
+        # Kolce: co 3.0s
+        if now_scan - self.last_spike_scan_time > 3.0:
+            self.cached_has_spikes, self.cached_spike_score = self.vision.find_spike_target(screen)
+            self.last_spike_scan_time = now_scan
+
+        mob_target = self.cached_mob_target
+        mob_score = self.cached_mob_score
+        loot_target = self.cached_loot_target
+        loot_score = self.cached_loot_score
+        has_spikes = self.cached_has_spikes
+        spike_score = self.cached_spike_score
 
         # Wyliczenie dystansu kafelkowego i klasyfikacja bliskich/dalekich mobków (Branch: FAST + SAFE MODE dla kolców)
         tile_size_px = 54.3
