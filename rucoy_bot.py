@@ -47,8 +47,7 @@ DEBUG_DIR = os.path.join(BASE_DIR, "debug")
 
 # --- Ustawienia detekcji, kolców i smyczy bojowej ---
 MATCH_THRESHOLD = 0.55          # Próg wykrywania jaszczurów (55% zgodności)
-ITEM_MATCH_THRESHOLD = 0.65     # Próg wykrywania leżącego lootu
-SPIKE_MATCH_THRESHOLD = 0.60    # Próg wykrywania kolców pułapek (60% zgodności)
+ITEM_MATCH_THRESHOLD = 0.50     # Próg wykrywania leżącego lootu (50% zgodności)
 MAX_ATTACK_DIST_PX = 270        # Maksymalny dystans do moba (blizej niz 5 kratek, ok. 270px)
 LEASH_MAX_TILES_X = 6           # Maksymalne odchylenie w osi X od kotwicy trasy (6 kratek)
 LEASH_MAX_TILES_Y = 4           # Maksymalne odchylenie w osi Y od kotwicy trasy (4 kratki)
@@ -152,11 +151,8 @@ class GameVision:
         self.templates_small = []    # przeskalowane 50% do szybkiego skanowania
         self.item_templates = []
         self.item_templates_small = []
-        self.spike_templates = []
-        self.spike_templates_small = []
         self.load_templates()
         self.load_item_templates()
-        self.load_spike_templates()
         if DEBUG_MODE:
             os.makedirs(DEBUG_DIR, exist_ok=True)
 
@@ -197,23 +193,7 @@ class GameVision:
         print("[Vision] Brak wariantów szablonów lootu w templates/item_variants.")
         return False
 
-    def load_spike_templates(self):
-        """Ładuje wszystkie warianty szablonów kolców z folderu templates/spike_variants."""
-        if not os.path.exists(SPIKE_TEMPLATES_DIR):
-            return False
 
-        for fname in sorted(os.listdir(SPIKE_TEMPLATES_DIR)):
-            path = os.path.join(SPIKE_TEMPLATES_DIR, fname)
-            tpl = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
-            if tpl is not None and tpl.size > 0:
-                self.spike_templates.append(tpl)
-                self.spike_templates_small.append(cv2.resize(tpl, None, fx=VISION_DOWNSCALE, fy=VISION_DOWNSCALE))
-
-        if self.spike_templates:
-            print(f"[Vision] Załadowano {len(self.spike_templates)} wariantów szablonu kolców.")
-            return True
-        print("[Vision] Brak wariantów szablonów kolców w templates/spike_variants.")
-        return False
 
     def capture_client_area(self, client_rect):
         monitor = {
@@ -342,32 +322,6 @@ class GameVision:
 
         return closest_target, best_score
 
-    def find_spike_target(self, img_bgr, threshold=SPIKE_MATCH_THRESHOLD):
-        """
-        Wyszukuje obecność kolców (pułapek) na ekranie.
-        Zwraca True/False w zależności od tego, czy znaleziono kolce o dopasowaniu >= threshold
-        oraz najwyższy wynik dopasowania.
-        """
-        if not self.spike_templates_small:
-            return False, 0.0
-
-        img_small = cv2.resize(img_bgr, None, fx=VISION_DOWNSCALE, fy=VISION_DOWNSCALE)
-        img_gray = cv2.cvtColor(img_small, cv2.COLOR_BGR2GRAY)
-
-        best_score = 0.0
-
-        for template in self.spike_templates_small:
-            th, tw = template.shape[:2]
-            if th >= img_gray.shape[0] or tw >= img_gray.shape[1]:
-                continue
-            
-            result = cv2.matchTemplate(img_gray, template, cv2.TM_CCOEFF_NORMED)
-            min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
-            if max_val > best_score:
-                best_score = max_val
-
-        has_spikes = best_score >= threshold
-        return has_spikes, best_score
 
     def _save_loot_debug_frame(self, img_bgr, loc, size, score, threshold):
         h, w = size
@@ -477,13 +431,10 @@ class RucoyBot:
         # Timery i cache skanowania wizualnego (throttling)
         self.last_lizard_scan_time = 0
         self.last_loot_scan_time = 0
-        self.last_spike_scan_time = 0
         self.cached_mob_target = None
         self.cached_mob_score = 0.0
         self.cached_loot_target = None
         self.cached_loot_score = 0.0
-        self.cached_has_spikes = False
-        self.cached_spike_score = 0.0
 
         self.waypoints = []
         self.wp_index = 0
@@ -580,19 +531,12 @@ class RucoyBot:
             self.cached_loot_target, self.cached_loot_score = self.vision.find_loot_target(screen)
             self.last_loot_scan_time = now_scan
 
-        # Kolce: co 3.0s
-        if now_scan - self.last_spike_scan_time > 3.0:
-            self.cached_has_spikes, self.cached_spike_score = self.vision.find_spike_target(screen)
-            self.last_spike_scan_time = now_scan
-
         mob_target = self.cached_mob_target
         mob_score = self.cached_mob_score
         loot_target = self.cached_loot_target
         loot_score = self.cached_loot_score
-        has_spikes = self.cached_has_spikes
-        spike_score = self.cached_spike_score
 
-        # Wyliczenie dystansu kafelkowego i klasyfikacja bliskich/dalekich mobków (Branch: FAST + SAFE MODE dla kolców)
+        # Wyliczenie dystansu kafelkowego i klasyfikacja bliskich/dalekich mobków
         tile_size_px = 54.3
         is_close_mob = False
         is_far_mob = False
@@ -603,10 +547,7 @@ class RucoyBot:
             tiles_x = abs(dx) / tile_size_px
             tiles_y = abs(dy) / tile_size_px
 
-            # Gdy widoczne są KOLCE -> wchodzimy w Tryb SAFE (rozszerzamy bezwzględną granicę zatrzymania do 4 kratek)
-            mob_safe_limit = 4.0 if has_spikes else 3.0
-
-            if tiles_x <= mob_safe_limit and tiles_y <= mob_safe_limit and (tiles_x > 0.4 or tiles_y > 0.4):
+            if tiles_x <= 3.0 and tiles_y <= 3.0 and (tiles_x > 0.4 or tiles_y > 0.4):
                 is_close_mob = True
             elif tiles_x <= 6.0 and tiles_y <= 6.0:
                 is_far_mob = True
@@ -624,9 +565,7 @@ class RucoyBot:
         now = time.time()
         if is_close_mob or is_far_mob:
             if now - self.last_attack_time > 0.20:
-                if has_spikes and is_close_mob:
-                    tag = f"[TRYB SAFE - KOLCE! <=4 kratki]"
-                elif is_close_mob:
+                if is_close_mob:
                     tag = "[BLISKI MOB <=3]"
                 else:
                     tag = "[MOB W BIEGU]"
