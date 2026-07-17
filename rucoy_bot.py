@@ -4,11 +4,91 @@ import time
 import random
 import json
 import ctypes
+import subprocess
 from ctypes import wintypes
 import cv2
 import numpy as np
 import mss
 import pydirectinput
+
+# ==============================================================================
+# 0. STEROWANIE I EKRAN W TLE (ADB CONTROLLER)
+# ==============================================================================
+class ADBController:
+    def __init__(self, adb_path=None, device_address="127.0.0.1:62001"):
+        self.device_address = device_address
+        self.adb_path = adb_path or self._find_adb()
+        self.connected = False
+
+    def _find_adb(self):
+        possible_paths = [
+            r"D:\Program Files\Nox\bin\nox_adb.exe",
+            r"C:\Program Files (x86)\Bignox\Nox\bin\nox_adb.exe",
+            r"C:\Program Files\Nox\bin\nox_adb.exe",
+            r"C:\Program Files (x86)\Nox\bin\nox_adb.exe",
+            "adb.exe"
+        ]
+        for path in possible_paths:
+            if os.path.exists(path):
+                return path
+        return "adb"
+
+    def connect(self):
+        try:
+            res = subprocess.run([self.adb_path, "connect", self.device_address], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
+            stdout_text = res.stdout.lower()
+            if "connected" in stdout_text or "already connected" in stdout_text:
+                self.connected = True
+                print(f"[ADB] Połączono z emulatorem w tle: {self.device_address} (ścieżka: {self.adb_path})")
+                return True
+            else:
+                print(f"[ADB] Status połączenia ADB: {res.stdout.strip()}")
+                self.connected = True
+                return True
+        except Exception as e:
+            print(f"[ADB] Ostrzeżenie przy łączeniu z ADB: {e}")
+        return False
+
+    def tap(self, x, y):
+        """Wysyła tapnięcie w punkt (X, Y) w tle bez używania myszki systemowej."""
+        cmd = [self.adb_path, "-s", self.device_address, "shell", "input", "tap", str(int(x)), str(int(y))]
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def press_key(self, key):
+        """
+        Zamiast wysyłać komendy ADB keyevent (które w grze Rucoy traktowane są jako pisanie na klawiaturze fizycznej
+        i wymuszają otwarcie okna czatu), wykonujemy bezpośrednie tąpnięcia ADB w wirtualne ikony skilli/potek na ekranie.
+        """
+        key_str = str(key).lower()
+        button_coords = {
+            'w': (100, 540),   # Przycisk ataku specjalnego (Skill Archer 'w')
+            '3': (120, 830),   # Przycisk mikstury leczenia (HP)
+            '1': (120, 700),   # Przycisk mikstury many (Mana)
+            'h': (1545, 245),  # Przycisk zbierania lootu z podłogi (pomarańczowa łapka '✋ H' przy samej prawej krawędzi pod zębatką)
+        }
+        if key_str in button_coords:
+            x, y = button_coords[key_str]
+            self.tap(x, y)
+            return f"OnScreenButton({x},{y})"
+        elif key_str in ['back', 'esc']:
+            cmd = [self.adb_path, "-s", self.device_address, "shell", "input", "keyevent", "111"]
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return "KEYCODE_ESCAPE(111)"
+        return None
+
+    def capture_frame(self):
+        """Przechwytuje klatkę ekranu bezpośrednio z Androida w tle."""
+        cmd = [self.adb_path, "-s", self.device_address, "exec-out", "screencap", "-p"]
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            stdout, _ = proc.communicate(timeout=2)
+            if stdout:
+                img_array = np.frombuffer(stdout, dtype=np.uint8)
+                img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+                return img
+        except Exception as e:
+            print(f"[ADB] Błąd pobierania klatki ekranu: {e}")
+        return None
 
 # ==============================================================================
 # 1. KONFIGURACJA
@@ -32,6 +112,7 @@ MANA_POTION_THRESHOLD = 0.50  # Użyj potiona many poniżej 1/2 (50%) Mana
 POTION_COOLDOWN = 1.0        # Odczekaj 1s po wypiciu potki, aby gra zdążyła uleczyć postać przed kolejnym odczytem
 
 # Ustawienia prędkości chodzenia bota
+WAYPOINT_STEP_DELAY = 0.18   # Opóźnienie między krokami trasy (180 ms)
 MOVEMENT_SPEED_FACTOR = 0.10  # Czas w sekundach na 1 kratkę (płynny marsz bez pauz)
 MIN_STEP_DELAY = 0.05          # Minimalne opóźnienie między krokami (brak przestojów)
 
@@ -46,7 +127,7 @@ DEBUG_DIR = os.path.join(BASE_DIR, "debug")
 
 # --- Ustawienia detekcji, kolców i smyczy bojowej ---
 MATCH_THRESHOLD = 0.55          # Próg wykrywania jaszczurów (55% zgodności)
-ITEM_MATCH_THRESHOLD = 0.50     # Próg wykrywania leżącego lootu (50% zgodności)
+ITEM_MATCH_THRESHOLD = 0.63     # Próg wykrywania leżącego lootu (63% zgodności)
 MAX_ATTACK_DIST_PX = 270        # Maksymalny dystans do moba (blizej niz 5 kratek, ok. 270px)
 LEASH_MAX_TILES_X = 6           # Maksymalne odchylenie w osi X od kotwicy trasy (6 kratek)
 LEASH_MAX_TILES_Y = 4           # Maksymalne odchylenie w osi Y od kotwicy trasy (4 kratki)
@@ -95,10 +176,12 @@ class WindowManager:
         windows = []
         callback = EnumWindowsProc(lambda hwnd, lparam: enum_windows_callback(hwnd, windows))
         user32.EnumWindows(callback, 0)
-        if not windows:
-            return False
-        self.hwnd, self.window_title = windows[0]
-        return True
+        if windows:
+            self.hwnd, self.window_title = windows[0]
+            return True
+        else:
+            self.window_title = "Nox Player (Background ADB Mode)"
+            return True
 
     def focus_window(self):
         if not self.hwnd:
@@ -106,13 +189,16 @@ class WindowManager:
         if user32.IsIconic(self.hwnd):
             user32.ShowWindow(self.hwnd, 9)  # SW_RESTORE
             time.sleep(0.2)
-        user32.SetForegroundWindow(self.hwnd)
+        try:
+            user32.SetForegroundWindow(self.hwnd)
+        except Exception:
+            pass
         time.sleep(0.2)
         return True
 
     def get_client_rect(self):
         if not self.hwnd:
-            return None
+            return {"left": 0, "top": 0, "width": 1600, "height": 900}
         rect_struct = wintypes.RECT()
         user32.GetClientRect(self.hwnd, ctypes.byref(rect_struct))
         point = wintypes.POINT(0, 0)
@@ -150,6 +236,7 @@ class GameVision:
         self.templates_small = []    # przeskalowane 50% do szybkiego skanowania
         self.item_templates = []
         self.item_templates_small = []
+        self.item_template_names = []
         self.load_templates()
         self.load_item_templates()
         if DEBUG_MODE:
@@ -185,6 +272,7 @@ class GameVision:
             if tpl is not None and tpl.size > 0:
                 self.item_templates.append(tpl)
                 self.item_templates_small.append(cv2.resize(tpl, None, fx=VISION_DOWNSCALE, fy=VISION_DOWNSCALE))
+                self.item_template_names.append(fname)
 
         if self.item_templates:
             print(f"[Vision] Załadowano {len(self.item_templates)} wariantów szablonu lootu.")
@@ -194,7 +282,12 @@ class GameVision:
 
 
 
-    def capture_client_area(self, client_rect):
+    def capture_client_area(self, client_rect, adb_controller=None):
+        if adb_controller and adb_controller.connected:
+            frame = adb_controller.capture_frame()
+            if frame is not None:
+                return frame
+
         monitor = {
             "top": client_rect["top"],
             "left": client_rect["left"],
@@ -270,16 +363,18 @@ class GameVision:
 
         return closest_target, best_score
 
-    def find_loot_target(self, img_bgr, threshold=ITEM_MATCH_THRESHOLD):
+    def find_loot_target(self, img_bgr, threshold=ITEM_MATCH_THRESHOLD, blacklist=None):
         """
-        Wyszukuje przedmioty leżące na podłodze. Zwraca najbliższy loot (pozycja środka przedmiotu)
-        oraz najwyższy wynik dopasowania.
+        Wyszukuje przedmioty leżące na podłodze. Zwraca najbliższy loot (pozycja środka przedmiotu),
+        wynik dopasowania oraz nazwę pliku wykrytego przedmiotu.
+        Ignoruje pozycje znajdujące się na aktywnej czarnej liście.
         """
         if not self.item_templates_small:
-            return None, 0.0
+            return None, 0.0, None
 
         img_small = cv2.resize(img_bgr, None, fx=VISION_DOWNSCALE, fy=VISION_DOWNSCALE)
         img_gray = cv2.cvtColor(img_small, cv2.COLOR_BGR2GRAY)
+        # Maskowanie UI (menu, czat)
         img_gray[0:int(50*VISION_DOWNSCALE), :] = 0
         img_gray[int(400*VISION_DOWNSCALE):, :] = 0
         img_gray[:, 0:int(75*VISION_DOWNSCALE)] = 0
@@ -290,36 +385,63 @@ class GameVision:
         closest_dist = float('inf')
         best_size = None
         best_loc = None
+        best_name = None
 
         center_x, center_y = SCREEN_CENTER
-
         center_x_s = int(center_x * VISION_DOWNSCALE)
         center_y_s = int(center_y * VISION_DOWNSCALE)
 
-        for template in self.item_templates_small:
+        # Wycięcie obszaru ROI 710x710 px wokół postaci (+1 kratka w każdą stronę, ok. 355x355 px w skalowanym obrazie)
+        roi_w = int(710 * VISION_DOWNSCALE)
+        roi_h = int(710 * VISION_DOWNSCALE)
+        min_x = max(0, center_x_s - roi_w // 2)
+        max_x = min(img_gray.shape[1], center_x_s + roi_w // 2)
+        min_y = max(0, center_y_s - roi_h // 2)
+        max_y = min(img_gray.shape[0], center_y_s + roi_h // 2)
+
+        crop_gray = img_gray[min_y:max_y, min_x:max_x]
+
+        now_t = time.time()
+        active_blacklist = [b for b in (blacklist or []) if now_t - b[2] < 25.0]
+
+        for idx, template in enumerate(self.item_templates_small):
             th, tw = template.shape[:2]
-            if th >= img_gray.shape[0] or tw >= img_gray.shape[1]:
+            if th >= crop_gray.shape[0] or tw >= crop_gray.shape[1]:
                 continue
             
-            result = cv2.matchTemplate(img_gray, template, cv2.TM_CCOEFF_NORMED)
+            result = cv2.matchTemplate(crop_gray, template, cv2.TM_CCOEFF_NORMED)
             locs = np.where(result >= threshold)
             
             for pt in zip(*locs[::-1]):
                 score = result[pt[1], pt[0]]
+                cx = min_x + pt[0] + tw // 2
+                cy = min_y + pt[1] + th // 2
+                real_cx = int(cx * scale_back)
+                real_cy = int(cy * scale_back)
+
+                # Sprawdzenie czy cel nie znajduje się w odległości < 50px od zablokowanego lootu
+                is_blacklisted = False
+                for bx, by, _ in active_blacklist:
+                    if np.sqrt((real_cx - bx) ** 2 + (real_cy - by) ** 2) < 50.0:
+                        is_blacklisted = True
+                        break
+
+                if is_blacklisted:
+                    continue
+
                 if score > best_score:
                     best_score = score
                 
-                cx = pt[0] + tw // 2
-                cy = pt[1] + th // 2
                 dist = np.sqrt((cx - center_x_s) ** 2 + (cy - center_y_s) ** 2)
                 
                 if dist < closest_dist:
                     closest_dist = dist
-                    closest_target = (int(cx * scale_back), int(cy * scale_back))
-                    best_loc = pt
+                    closest_target = (real_cx, real_cy)
+                    best_loc = (min_x + pt[0], min_y + pt[1])
                     best_size = (th, tw)
+                    best_name = self.item_template_names[idx] if idx < len(self.item_template_names) else "Item"
 
-        return closest_target, best_score
+        return closest_target, best_score, best_name
 
 
     def _save_loot_debug_frame(self, img_bgr, loc, size, score, threshold):
@@ -390,14 +512,45 @@ pydirectinput.FAILSAFE = False
 
 
 class GameController:
+    def __init__(self, adb_controller=None):
+        self.adb = adb_controller
+
     def click_relative(self, client_rect, relative_x, relative_y, jitter=3):
-        abs_x = client_rect["left"] + relative_x + random.randint(-jitter, jitter)
-        abs_y = client_rect["top"] + relative_y + random.randint(-jitter, jitter)
-        pydirectinput.moveTo(abs_x, abs_y)
-        pydirectinput.click()
+        abs_x = relative_x + random.randint(-jitter, jitter)
+        abs_y = relative_y + random.randint(-jitter, jitter)
+
+        # 1. Bezwzględna ochrona interfejsu UI w Rucoy:
+        # Górny pasek/ikona czatu (Y < 105), dolny pasek czatu (Y > 795), lewy panel skilli (X < 155), prawy panel broni (X > 1400 i Y > 600)
+        abs_y = max(105, min(795, abs_y))
+        abs_x = max(155, min(1590, abs_x))
+        if abs_y > 600 and abs_x > 1400:
+            abs_x = 1395
+
+        # 2. Ochrona ciała postaci gracza na środku ekranu (800x450):
+        # Tąpnięcie bezpośrednio w ciało postaci (X: 760..840, Y: 380..500) otwiera ekwipunek.
+        if 760 <= abs_x <= 840 and 380 <= abs_y <= 500:
+            if abs_y < 450:
+                abs_y = 360  # Odsuwamy lekko nad ciało postaci
+            else:
+                abs_y = 530  # Odsuwamy lekko pod stopy postaci
+
+        if self.adb and self.adb.connected:
+            print(f"[ADB Tap] Tapnięcie na ekranie: ({abs_x}, {abs_y}) [Wektor od środka: ({relative_x - SCREEN_CENTER[0]}, {relative_y - SCREEN_CENTER[1]})]")
+            self.adb.tap(abs_x, abs_y)
+        else:
+            screen_x = client_rect["left"] + abs_x
+            screen_y = client_rect["top"] + abs_y
+            print(f"[Mouse Click] Kliknięcie myszą: ({screen_x}, {screen_y}) [Względne: ({abs_x}, {abs_y})]")
+            pydirectinput.moveTo(screen_x, screen_y)
+            pydirectinput.click()
 
     def press_key(self, key):
-        pydirectinput.press(key)
+        if self.adb and self.adb.connected:
+            code = self.adb.press_key(key)
+            print(f"[ADB Key] Klawisz: '{key}' (ADB KEYCODE_{code})")
+        else:
+            print(f"[Mouse Key] Klawisz: '{key}'")
+            pydirectinput.press(key)
 
 
 # ==============================================================================
@@ -432,9 +585,12 @@ class RucoyBot:
         self.cached_mob_score = 0.0
         self.cached_loot_target = None
         self.cached_loot_score = 0.0
+        self.cached_loot_name = None
+        self.loot_blacklist = []  # Czarna lista niepodnoszalnych pozycji lootu [(x, y, timestamp)]
 
         self.waypoints = []
         self.wp_index = 0
+        self.last_wp_vector = None
         if route_filename:
             self.load_route(route_filename)
         else:
@@ -468,7 +624,7 @@ class RucoyBot:
             print("[Bot] Błąd: Brak dostępu do Nox Client.")
             return
 
-        screen = self.vision.capture_client_area(client_rect)
+        screen = self.vision.capture_client_area(client_rect, adb_controller=self.controller.adb)
 
         # 1. Survival Check (Priorytet najwyższy z regulowanym POTION_COOLDOWN)
         now_pot = time.time()
@@ -487,20 +643,21 @@ class RucoyBot:
         # 2. Skanowanie wizualne z throttlingiem czasowym (NIE co klatkę!)
         now_scan = time.time()
 
-        # Lizardy: co 0.8s
-        if now_scan - self.last_lizard_scan_time > 0.8:
+        # Lizardy: co 0.6s
+        if now_scan - self.last_lizard_scan_time > 0.6:
             self.cached_mob_target, self.cached_mob_score = self.vision.find_lizard_target(screen)
             self.last_lizard_scan_time = now_scan
 
-        # Loot: co 1.3s
-        if now_scan - self.last_loot_scan_time > 1.3:
-            self.cached_loot_target, self.cached_loot_score = self.vision.find_loot_target(screen)
+        # Loot: co 0.4s (szybkie wykrywanie nowych dropów)
+        if now_scan - self.last_loot_scan_time > 0.4:
+            self.cached_loot_target, self.cached_loot_score, self.cached_loot_name = self.vision.find_loot_target(screen, blacklist=self.loot_blacklist)
             self.last_loot_scan_time = now_scan
 
         mob_target = self.cached_mob_target
         mob_score = self.cached_mob_score
         loot_target = self.cached_loot_target
         loot_score = self.cached_loot_score
+        loot_name = self.cached_loot_name
 
         # Wyliczenie dystansu kafelkowego i klasyfikacja bliskich/dalekich mobków
         tile_size_px = 54.3
@@ -524,58 +681,86 @@ class RucoyBot:
             dy_l = loot_target[1] - SCREEN_CENTER[1]
             tiles_x_l = abs(dx_l) / tile_size_px
             tiles_y_l = abs(dy_l) / tile_size_px
-            if tiles_x_l <= 6.0 and tiles_y_l <= 6.0:
+            if tiles_x_l <= 7.0 and tiles_y_l <= 7.0:
                 can_get_loot = True
 
-        # 4. Atakowanie jaszczurów (Strzelanie ze skilla 'w') — NIE BLOKUJE RUCHU!
-        now = time.time()
-        if is_close_mob or is_far_mob:
-            if now - self.last_attack_time > 0.20:
-                if is_close_mob:
-                    tag = "[BLISKI MOB <=3]"
-                else:
-                    tag = "[MOB W BIEGU]"
-
-                print(f"[Combat] Skill '{KEY_SPECIAL_ATTACK}' {tag}")
-                self.controller.press_key(KEY_SPECIAL_ATTACK)
-                self.last_attack_time = now
-
-        # 5. RUCH — ZAWSZE się wykonuje (potki/strzały nie blokują!)
+        # 4. RUCH i ATAK — ZAWSZE się wykonują (potki/strzały nie blokują!)
         if can_get_loot:
-            dx = loot_target[0] - SCREEN_CENTER[0]
-            dy = loot_target[1] - SCREEN_CENTER[1]
+            # KROK 0: Czekaj 0.35s na wyhamowanie postaci z bieżącego kroku przed pomiarem
+            print(f"[Loot] Przedmiot dostrzeżony. Wyhamowuję ruch do świeżego pomiaru...")
+            time.sleep(0.35)
 
-            total_tiles = max(1, int(round((abs(dx) + abs(dy)) / tile_size_px)))
-            walk_delay = max(MIN_STEP_DELAY, total_tiles * MOVEMENT_SPEED_FACTOR)
+            # KROK 1: Świeży screenshot TERAZ (postać całkowicie nieruchoma)
+            fresh_screen = self.vision.capture_client_area(client_rect, adb_controller=self.controller.adb)
+            fresh_loot, fresh_score, fresh_name = self.vision.find_loot_target(fresh_screen, blacklist=self.loot_blacklist)
 
-            print(f"[FSM] LOOT DETECTED! Dystans: {total_tiles} kratek. Podchodzę na pozycję {loot_target}...")
-            self.controller.click_relative(client_rect, loot_target[0], loot_target[1])
-            time.sleep(walk_delay)
+            if fresh_loot is None:
+                print(f"[Loot] Świeży skan na zatrzymanej postaci nie potwierdził lootu (fałszywy alarm). Kontynuuję trasę.")
+                self.cached_loot_target = None
+                self.cached_loot_score = 0.0
+            else:
+                # KROK 2: Użyj ŚWIEŻYCH i precyzyjnych współrzędnych ze stabilnego obrazu
+                dx = fresh_loot[0] - SCREEN_CENTER[0]
+                dy = fresh_loot[1] - SCREEN_CENTER[1]
 
-            self.controller.press_key(KEY_LOOT)
-            time.sleep(0.05)
-            self.controller.press_key(KEY_LOOT)
-            time.sleep(0.05)
+                total_tiles = max(1, int(round((abs(dx) + abs(dy)) / tile_size_px)))
+                walk_time = max(0.6, total_tiles * 0.18 + 0.20)
 
-            # Powrót do miejsca wyjściowego
-            return_x = SCREEN_CENTER[0] - dx
-            return_y = SCREEN_CENTER[1] - dy
-            self.controller.click_relative(client_rect, return_x, return_y)
-            time.sleep(walk_delay)
+                item_label = f" [{fresh_name}]" if fresh_name else ""
+                print(f"[FSM] LOOT CONFIRMED{item_label} ({fresh_score*100:.0f}%)! Świeże współrzędne: {fresh_loot}, dystans: {total_tiles} kratek (marsz: {walk_time:.2f}s)...")
+                self.controller.click_relative(client_rect, fresh_loot[0], fresh_loot[1])
+                time.sleep(walk_time)
 
+                print(f"[Loot] Podnoszę przedmioty (pojedyncze kliknięcie ikony '{KEY_LOOT}')...")
+                self.controller.press_key(KEY_LOOT)
+                time.sleep(0.15)
+
+                # KROK 3: Precyzyjny powrót na punkt wyjściowy trasy sprzed odskoku
+                return_x = SCREEN_CENTER[0] - dx
+                return_y = SCREEN_CENTER[1] - dy
+                print(f"[Loot] Wracam na punkt wyjściowy trasy sprzed odskoku: ({return_x}, {return_y}) (marsz: {walk_time:.2f}s)...")
+                self.controller.click_relative(client_rect, return_x, return_y)
+                time.sleep(walk_time)
+
+                # Rejestracja w czarnej liście + wyczyszczenie cache i wymuszenie natychmiastowego skanu w następnej klatce
+                self.loot_blacklist.append((fresh_loot[0], fresh_loot[1], time.time()))
+                self.cached_loot_target = None
+                self.cached_loot_score = 0.0
         else:
-            # Podążanie po nagranej trasie ROUTE (200ms między krokami)
+            # Podążanie po nagranej trasie ROUTE
             if self.waypoints:
                 wp = self.waypoints[self.wp_index]
                 dx, dy = wp["dx"], wp["dy"]
                 tx = SCREEN_CENTER[0] + dx
                 ty = SCREEN_CENTER[1] + dy
 
-                step_delay = 0.20  # 200ms
+                # Wykrywanie ostrego zakrętu 90° (zmiana kierunku poziomego na pionowy lub odwrotnie)
+                extra_corner_delay = 0.0
+                if self.last_wp_vector is not None:
+                    prev_dx, prev_dy = self.last_wp_vector
+                    if (abs(prev_dx) > 40 and abs(dy) > 40) or (abs(prev_dy) > 40 and abs(dx) > 40):
+                        extra_corner_delay = 0.12  # +120ms na stabilizację na rogu zakrętu
+                        print(f"[Corner Fix] Wykryto zakręt 90° na wp {self.wp_index + 1} (Wektor {prev_dx},{prev_dy} -> {dx},{dy})! Wyhamowuję o +120ms...")
 
-                print(f"[FSM] ROUTE [{self.wp_index + 1}/{len(self.waypoints)}]. Krok ({dx}, {dy}) (200ms)")
+                self.last_wp_vector = (dx, dy)
+                wp_num = self.wp_index + 1
+                step_delay = WAYPOINT_STEP_DELAY + extra_corner_delay
+
+                print(f"[FSM] ROUTE [{wp_num}/{len(self.waypoints)}]. Wektor ({dx}, {dy}) -> Cel: ({tx}, {ty}) ({int(step_delay*1000)}ms)")
                 self.controller.click_relative(client_rect, tx, ty)
-                time.sleep(step_delay)
+
+                # Atakowanie jaszczurów po kliknięciu ruchu z buforem 80ms (eliminacja nakładania paczek ADB)
+                now = time.time()
+                if (is_close_mob or is_far_mob) and (now - self.last_attack_time > 0.20):
+                    tag = "[BLISKI MOB <=3]" if is_close_mob else "[MOB W BIEGU]"
+                    time.sleep(0.08)
+                    print(f"[Combat] Skill '{KEY_SPECIAL_ATTACK}' {tag}")
+                    self.controller.press_key(KEY_SPECIAL_ATTACK)
+                    self.last_attack_time = now
+                    time.sleep(max(0.0, step_delay - 0.08))
+                else:
+                    time.sleep(step_delay)
+
                 self.wp_index = (self.wp_index + 1) % len(self.waypoints)
             else:
                 dx, dy = random.choice([(380, 0), (-380, 0), (0, 380), (0, -380)])
@@ -815,12 +1000,22 @@ def main():
         print("[-] Brak jakichkolwiek szablonów! Uruchom najpierw kalibrację.")
         sys.exit(1)
 
-    controller = GameController()
+    # Inicjalizacja sterownika ADB w tle (chyba że podano flagę --no-adb)
+    use_adb = "--no-adb" not in sys.argv
+    adb_ctrl = ADBController()
+    if use_adb:
+        adb_ctrl.connect()
+
+    controller = GameController(adb_controller=adb_ctrl if use_adb else None)
     bot = RucoyBot(win_mgr, vision, controller, route_filename=selected_route)
 
-    print("\n[+] Wszystko gotowe! Uruchamiam pętlę bota za 5 sekund...")
-    print("[+] Przełącz teraz na okno Nox Playera.")
-    for i in range(5, 0, -1):
+    print("\n[+] Wszystko gotowe! Uruchamiam pętlę bota w TLE za 3 sekundy...")
+    if adb_ctrl.connected and use_adb:
+        print("[+] TRYB W TLE AKTYWNY (ADB): Możesz zminimalizować/przykryć Noxa i swobodnie korzystać z komputera.")
+    else:
+        print("[!] TRYB MYSZY SYSTEMOWEJ (ADB wyłączone): Bot przejmuje myszkę.")
+
+    for i in range(3, 0, -1):
         print(f"{i}...")
         time.sleep(1.0)
 
@@ -833,7 +1028,8 @@ def main():
             bot.run_step()
             time.sleep(0.01)
     except KeyboardInterrupt:
-        print("\n[+] Bot został zatrzymany przez użytkownika.")
+        print("\n[+] Bot został zatrzymany przez użytkownika (Ctrl+C). Wyłączam.")
+        sys.exit(0)
 
 
 if __name__ == "__main__":
